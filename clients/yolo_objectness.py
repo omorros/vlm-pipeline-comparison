@@ -1,32 +1,33 @@
 """
-14-class YOLO inference client for Pipeline B.
+1-class objectness YOLO inference client for Pipeline C.
 
-Loads a fine-tuned YOLOv8 model trained on the 14 fruit/vegetable classes.
-Returns detections as class labels + bounding boxes, converted directly to inventory.
+Loads a YOLOv8 model trained to detect any fruit/vegetable as a single "object" class.
+Returns bounding boxes only (no class labels) — classification is deferred to the CNN.
 
 Singleton pattern: model loads once, reused across runs.
 """
 
 from pathlib import Path
-from typing import Dict, List
+from typing import List, Dict
 
+from PIL import Image
 from ultralytics import YOLO
 
-from config import CONFIG, ID_TO_CLASS
+from config import CONFIG
 
 # Singleton instance
 _model: YOLO | None = None
 
 
 def _get_model() -> YOLO:
-    """Get or load the 14-class YOLO model (singleton)."""
+    """Get or load the objectness YOLO model (singleton)."""
     global _model
     if _model is None:
-        weights = Path(CONFIG.yolo_14class_weights)
+        weights = Path(CONFIG.yolo_objectness_weights)
         if not weights.exists():
             raise FileNotFoundError(
-                f"14-class YOLO weights not found at {weights}. "
-                "Train first: python -m training.train_yolo_14class"
+                f"Objectness YOLO weights not found at {weights}. "
+                "Train first: python -m training.train_yolo_objectness"
             )
         _model = YOLO(str(weights))
     return _model
@@ -34,15 +35,13 @@ def _get_model() -> YOLO:
 
 def detect(image_path: str) -> List[Dict]:
     """
-    Run 14-class YOLO detection on an image.
+    Run objectness detection on an image.
 
     Args:
         image_path: Path to input image.
 
     Returns:
         List of detections, each with keys:
-            - class_id (int)
-            - class_name (str)
             - confidence (float)
             - bbox (tuple): (x1, y1, x2, y2) in pixels
     """
@@ -63,15 +62,9 @@ def detect(image_path: str) -> List[Dict]:
         if boxes is None:
             continue
         for i in range(len(boxes)):
-            cls_id = int(boxes.cls[i].item())
-            class_name = ID_TO_CLASS.get(cls_id)
-            if class_name is None:
-                continue
             conf = float(boxes.conf[i].item())
             x1, y1, x2, y2 = boxes.xyxy[i].tolist()
             detections.append({
-                "class_id": cls_id,
-                "class_name": class_name,
                 "confidence": round(conf, 4),
                 "bbox": (round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)),
             })
@@ -79,21 +72,39 @@ def detect(image_path: str) -> List[Dict]:
     return detections
 
 
-def detections_to_inventory(detections: List[Dict]) -> Dict[str, int]:
+def crop_detections(image_path: str, detections: List[Dict], padding: float | None = None) -> List[Image.Image]:
     """
-    Convert detection list to inventory (class -> count).
+    Crop detected regions from the image with optional padding.
 
     Args:
+        image_path: Path to input image.
         detections: List of detection dicts from detect().
+        padding: Fractional padding around each box (default: CONFIG.cnn_crop_padding).
 
     Returns:
-        Inventory dict.
+        List of PIL Image crops, same order as detections.
     """
-    inventory: Dict[str, int] = {}
+    padding = padding if padding is not None else CONFIG.cnn_crop_padding
+    img = Image.open(image_path).convert("RGB")
+    w, h = img.size
+    crops = []
+
     for det in detections:
-        name = det["class_name"]
-        inventory[name] = inventory.get(name, 0) + 1
-    return inventory
+        x1, y1, x2, y2 = det["bbox"]
+        bw = x2 - x1
+        bh = y2 - y1
+        pad_x = bw * padding
+        pad_y = bh * padding
+
+        cx1 = max(0, x1 - pad_x)
+        cy1 = max(0, y1 - pad_y)
+        cx2 = min(w, x2 + pad_x)
+        cy2 = min(h, y2 + pad_y)
+
+        crop = img.crop((cx1, cy1, cx2, cy2))
+        crops.append(crop)
+
+    return crops
 
 
 def warmup():
